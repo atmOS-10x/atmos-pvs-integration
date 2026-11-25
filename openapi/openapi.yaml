@@ -1,0 +1,1930 @@
+openapi: 3.1.0
+info:
+  title: atmOS Health – PVS-Schnittstelle
+  version: 0.1.0
+  summary: Schnittstelle, die eine Praxissoftware (PVS) bereitstellt, damit atmOS Health sie anbinden kann.
+  description: |
+    Diese Datei beschreibt die REST-Schnittstelle, die eine Praxissoftware (PVS) anbietet.
+    atmOS Health ist der Client: atmOS ruft die Endpunkte auf, das PVS beantwortet sie.
+
+    Die Erläuterungen und Anwendungsfälle stehen im Ordner `docs/` dieses Repositorys.
+    Diese Datei ist ein Entwurf (Version 0.x) und kann sich ändern, bis Version 1.0
+    erschienen ist.
+
+    **Module.** Jeder Endpunkt gehört zu einem Modul (Tag). Module mit dem Zusatz
+    „Pflicht“ muss jede Anbindung bereitstellen. Optionale Module dürfen fehlen; wenn ein
+    PVS ein optionales Modul anbietet, stellt es alle Endpunkte dieses Moduls bereit.
+    Welche Module ein PVS anbietet, meldet es über `GET /v1/info`. Welche Felder Pflicht
+    sind, zeigt `required` in den Schemas.
+
+    **Formate.** JSON in UTF-8. Datum als `YYYY-MM-DD`, Zeitpunkte nach RFC 3339 mit
+    Zeitzonenangabe (z. B. `2026-12-01T09:30:00+01:00`). Telefonnummern im Format E.164.
+    Fehler nach RFC 9457 (`application/problem+json`).
+  contact:
+    name: atmOS Health
+servers:
+  - url: https://pvs.example.org/atmos
+    description: |
+      Beispiel für eine Installation je Praxis bzw. Standort. Die echte Adresse legt der
+      Hersteller fest (siehe docs/grundlagen.md).
+  - url: https://pvs.example.org/atmos/{practice_id}
+    description: |
+      Beispiel für ein PVS mit einer zentralen Datenbank für mehrere Praxen: die Praxis bzw.
+      der Standort steht als Praxis-ID in der Basisadresse.
+    variables:
+      practice_id:
+        default: p-1001
+        description: Die Praxis-ID, die das PVS vergibt.
+security:
+  - bearerAuth: []
+tags:
+  - name: Allgemein
+    description: Pflicht. Version und angebotene Module.
+  - name: Patienten
+    description: Pflicht. Patientensuche und Stammdaten.
+  - name: Kontaktdaten
+    description: Optional. Telefonnummern und E-Mail-Adressen eines Patienten ergänzen oder ändern.
+  - name: Mitarbeitende
+    description: Pflicht. Behandler, MFA und weitere Benutzer des PVS mit ihrem Kürzel.
+  - name: Kartei
+    description: Pflicht. Karteieinträge lesen und schreiben.
+  - name: Medikation
+    description: Optional. Medikationsplan lesen und Medikamente (Rezepte) bestellen.
+  - name: Freitext-Bestellung
+    description: Optional. Medikament als Freitext bestellen, ohne PZN.
+  - name: AU-Anfragen
+    description: Optional. Arbeitsunfähigkeitsbescheinigung (AU bzw. eAU) anfragen; der Arzt entscheidet im PVS.
+  - name: AU-Verlauf
+    description: Optional. Ausgestellte Arbeitsunfähigkeitsbescheinigungen (AU und eAU) eines Patienten lesen.
+  - name: Überweisungs-Anfragen
+    description: Optional. Überweisung anfragen, auch als Folgeüberweisung; der Arzt entscheidet im PVS.
+  - name: Überweisungs-Verlauf
+    description: Optional. Ausgestellte Überweisungen eines Patienten lesen.
+  - name: Dokumente
+    description: Optional. Dokumente eines Patienten auflisten, abrufen und ablegen.
+  - name: Kalender
+    description: Optional. Kalender, freie Termine, gebuchte Termine, buchen und absagen.
+
+paths:
+  /v1/info:
+    get:
+      tags: [Allgemein]
+      operationId: getInfo
+      summary: Version und angebotene Module
+      description: |
+        atmOS ruft diesen Endpunkt beim Einrichten und danach regelmäßig auf, um zu prüfen,
+        ob die Schnittstelle erreichbar ist und welche Module sie anbietet.
+      responses:
+        "200":
+          description: Angaben zur Schnittstelle.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Info" }
+              example:
+                api_version: "0.1.0"
+                pvs_name: Beispiel-PVS
+                pvs_version: "24.3.1"
+                modules: [patients, staff, casefile, contact_update, medication, medication_free_text, sick_note_requests, sick_note_history, referral_requests, referral_history, documents, calendar]
+                time_zone: Europe/Berlin
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/patients/search:
+    get:
+      tags: [Patienten]
+      operationId: searchPatients
+      summary: Patienten suchen
+      description: |
+        Liefert eine nach Übereinstimmung sortierte Trefferliste (beste Übereinstimmung zuerst).
+
+        **Anwendungsfälle:** Eine E-Mail, Chatnachricht oder ein Anruf kommt im Posteingang an
+        und atmOS ordnet ihn dem richtigen Patienten zu, z. B. über Telefonnummer und
+        Geburtsdatum. Mitarbeitende suchen einen Patienten nach Name und Geburtsdatum.
+
+        Mindestens ein Suchparameter ist anzugeben. Mehrere Parameter werden mit UND
+        verknüpft; das PVS darf zusätzlich Treffer zurückgeben, die nur teilweise passen, wenn es
+        sie mit niedrigerem `score` einordnet. Namen werden ohne Rücksicht auf Groß- und
+        Kleinschreibung und als Präfix verglichen („Muster“ findet „Mustermann“).
+      parameters:
+        - name: first_name
+          in: query
+          description: Vorname oder dessen Anfang.
+          schema: { type: string, maxLength: 100 }
+          example: Max
+        - name: last_name
+          in: query
+          description: Nachname oder dessen Anfang.
+          schema: { type: string, maxLength: 100 }
+          example: Muster
+        - name: birth_date
+          in: query
+          description: |
+            Geburtsdatum, auch unvollständig: `YYYY-MM-DD` (vollständig), `YYYY-MM` (Jahr und
+            Monat), `YYYY` (nur Jahr) oder `--MM-DD` (Tag und Monat ohne Jahr).
+          schema:
+            type: string
+            pattern: "^(\\d{4}(-\\d{2}(-\\d{2})?)?|--\\d{2}-\\d{2})$"
+          example: "1970-01"
+        - name: phone
+          in: query
+          description: |
+            Telefonnummer, bevorzugt in E.164 (`+493023125000`). Das PVS vergleicht unabhängig
+            von der Schreibweise in der Kartei (Leerzeichen, Bindestriche, `0` statt `+49`).
+          schema: { type: string, maxLength: 32 }
+          example: "+493023125000"
+        - name: email
+          in: query
+          description: E-Mail-Adresse, ohne Rücksicht auf Groß- und Kleinschreibung.
+          schema: { type: string, maxLength: 254 }
+          example: max.mustermann@example.org
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Trefferliste, beste Übereinstimmung zuerst. Leer, wenn nichts passt.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PatientMatch" }
+              example:
+                items:
+                  - patient_id: "4711"
+                    first_name: Max
+                    last_name: Mustermann
+                    birth_date: "1970-01-01"
+                    score: 1.0
+                  - patient_id: "4712"
+                    first_name: Maxi
+                    last_name: Mustermann
+                    birth_date: "1970-01-21"
+                    score: 0.6
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/patients/{patient_id}:
+    get:
+      tags: [Patienten]
+      operationId: getPatient
+      summary: Stammdaten eines Patienten
+      description: |
+        **Anwendungsfälle:** atmOS zeigt Mitarbeitenden die Stammdaten zu einer Anfrage an.
+        Der Telefonassistent leitet Anrufe je nach Versicherungsstatus (GKV, PKV, HZV)
+        unterschiedlich. Vor einer Rezeptbestellung prüft atmOS, ob die Versichertenkarte im
+        laufenden Quartal eingelesen wurde.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      responses:
+        "200":
+          description: Stammdaten.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Patient" }
+              example:
+                patient_id: "4711"
+                first_name: Max
+                last_name: Mustermann
+                title: Dr.
+                birth_date: "1970-01-01"
+                sex: male
+                insurance:
+                  type: public
+                  insurer_name: Beispiel-Krankenkasse
+                  insurance_number: X000000000
+                  hzv: active
+                  contracts:
+                    - type: hzv
+                      name: Beispiel-HZV-Vertrag
+                      status: active
+                      since: "2024-01-01"
+                  card_last_read_at: "2026-10-06T08:12:00+02:00"
+                phones:
+                  - phone_id: p1
+                    number: "+493023125000"
+                    number_raw: "030 / 23125 000"
+                    kind: landline
+                    primary: true
+                  - phone_id: p2
+                    number: "+491713920000"
+                    number_raw: "0171 39200 00"
+                    kind: mobile
+                    primary: false
+                emails:
+                  - email_id: e1
+                    address: max.mustermann@example.org
+                    primary: true
+                address:
+                  street: Musterstraße 1
+                  zip_code: "12345"
+                  city: Musterstadt
+                  country: DE
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/patients/{patient_id}/phones:
+    post:
+      tags: [Kontaktdaten]
+      operationId: addPatientPhone
+      summary: Telefonnummer hinzufügen
+      description: |
+        **Anwendungsfall:** Ein Patient ruft von einer neuen Nummer an oder nennt eine neue
+        Handynummer; Mitarbeitende übernehmen sie mit einem Klick ins PVS.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PhoneInput" }
+            example:
+              number: "+491713920000"
+              kind: mobile
+              primary: false
+              user_code: MUS
+      responses:
+        "201":
+          description: Angelegt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Phone" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/patients/{patient_id}/phones/{phone_id}:
+    patch:
+      tags: [Kontaktdaten]
+      operationId: updatePatientPhone
+      summary: Telefonnummer ändern
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: phone_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PhonePatch" }
+            example:
+              number: "+491713920001"
+              user_code: MUS
+      responses:
+        "200":
+          description: Geändert.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Phone" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/patients/{patient_id}/emails:
+    post:
+      tags: [Kontaktdaten]
+      operationId: addPatientEmail
+      summary: E-Mail-Adresse hinzufügen
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailInput" }
+            example:
+              address: max.mustermann@example.org
+              primary: true
+              user_code: MUS
+      responses:
+        "201":
+          description: Angelegt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Email" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /v1/patients/{patient_id}/emails/{email_id}:
+    patch:
+      tags: [Kontaktdaten]
+      operationId: updatePatientEmail
+      summary: E-Mail-Adresse ändern
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: email_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/EmailPatch" }
+            example:
+              address: m.mustermann@example.org
+              user_code: MUS
+      responses:
+        "200":
+          description: Geändert.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Email" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/staff:
+    get:
+      tags: [Mitarbeitende]
+      operationId: listStaff
+      summary: Alle Benutzer des PVS
+      description: |
+        Alle Behandler, MFA und sonstigen Benutzer, die in dieser PVS-Installation angelegt sind.
+
+        **Anwendungsfälle:** In atmOS wird jeder Mitarbeitende einmal seinem PVS-Kürzel
+        zugeordnet. Schreibt atmOS danach in die Kartei, steht dort das Kürzel der Person,
+        die den Eintrag freigegeben hat. Kürzel aus der Kartei zeigt atmOS mit vollem Namen an.
+      responses:
+        "200":
+          description: Liste aller Benutzer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/StaffMember" }
+              example:
+                items:
+                  - user_code: MUS
+                    full_name: Dr. med. Erika Musterfrau
+                    active: true
+                  - user_code: BSP
+                    full_name: Bernd Beispiel
+                    active: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/casefile/text-groups:
+    get:
+      tags: [Kartei]
+      operationId: listTextGroups
+      summary: Textgruppen (Karteikategorien)
+      description: |
+        Alle Textgruppen, unter denen Karteieinträge stehen können (z. B. Befund, Diagnose,
+        Labor). In der Einrichtung wählt die Praxis, in welche Textgruppe atmOS schreibt.
+      responses:
+        "200":
+          description: Liste der Textgruppen.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TextGroup" }
+              example:
+                items:
+                  - code: B
+                    label: Befund
+                    writable: true
+                    hidden: false
+                  - code: L
+                    label: Labor
+                    writable: false
+                    hidden: false
+                  - code: ATM
+                    label: atmOS Kommunikation
+                    writable: true
+                    hidden: true
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/patients/{patient_id}/casefile:
+    get:
+      tags: [Kartei]
+      operationId: readCasefile
+      summary: Karteieinträge lesen
+      description: |
+        **Anwendungsfälle:** atmOS zeigt Mitarbeitenden zu einer Anfrage die passenden
+        Karteieinträge (z. B. die letzten Laborwerte, wenn ein Patient nach seinem Befund fragt).
+        atmOS prüft vor einer Antwort, ob ein Anliegen schon dokumentiert ist.
+
+        Sortierung: neueste Einträge zuerst. Alle Filter sind optional und werden mit UND
+        verknüpft.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: q
+          in: query
+          description: Volltextsuche im Eintragstext, ohne Rücksicht auf Groß- und Kleinschreibung.
+          schema: { type: string, maxLength: 200 }
+          example: Blutdruck
+        - name: text_group
+          in: query
+          description: Nur diese Textgruppen (Code aus `GET /v1/casefile/text-groups`). Mehrfach angebbar.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+          example: [B, L]
+        - name: from
+          in: query
+          description: Frühestes Eintragsdatum (einschließlich).
+          schema: { type: string, format: date }
+          example: "2026-01-01"
+        - name: to
+          in: query
+          description: Spätestes Eintragsdatum (einschließlich).
+          schema: { type: string, format: date }
+          example: "2026-11-30"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Karteieinträge, neueste zuerst.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/CasefileEntry" }
+                  next_cursor:
+                    type: [string, "null"]
+                    description: Cursor für die nächste Seite; `null`, wenn es keine weitere gibt.
+              example:
+                items:
+                  - entry_id: k-1001
+                    text_group: B
+                    text_group_label: Befund
+                    text: "RR 130/85 mmHg, Puls 72/min"
+                    user_code: MUS
+                    written_at: "2026-11-02T10:15:00+01:00"
+                next_cursor: null
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Kartei]
+      operationId: writeCasefile
+      summary: Karteieintrag schreiben
+      description: |
+        **Anwendungsfälle:** atmOS dokumentiert ein bearbeitetes Anliegen (z. B. „Rezept
+        telefonisch bestellt“, eine Terminabsage oder die Zusammenfassung eines Anrufs) in der
+        Kartei, unter dem Kürzel der Person, die es freigegeben hat.
+
+        Das PVS legt den Eintrag unverändert an; es kürzt den Text nicht stillschweigend.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CasefileEntryInput" }
+            example:
+              text_group: ATM
+              text: "Patient bittet telefonisch um Folgerezept Ramipril 5 mg. An Praxis weitergeleitet."
+              user_code: BSP
+              written_at: "2026-11-24T09:41:00+01:00"
+      responses:
+        "201":
+          description: Angelegt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CasefileEntry" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/patients/{patient_id}/medication-plan:
+    get:
+      tags: [Medikation]
+      operationId: getMedicationPlan
+      summary: Medikationsplan eines Patienten
+      description: |
+        **Anwendungsfälle:** Ein Patient bestellt am Telefon ein Folgerezept und wählt dabei aus
+        seinem Medikationsplan. atmOS erinnert rechtzeitig, bevor ein
+        Medikament aufgebraucht ist (`runs_out_at`).
+
+        **Freigabe:** `approval` sagt, ob ein Arzt den Plan als aktuell bestätigt hat. Nur ein
+        Arzt, keine MFA, kann den Plan freigeben; das PVS liefert `approved: true` nur, wenn die
+        Freigabe von einem Arzt stammt. Ist der Plan freigegeben,
+        kann eine Bestellung aus diesem Plan ohne Vorprüfung durch die MFA direkt beim Arzt
+        landen. Ändert sich der Plan nach der Freigabe, gilt er als nicht freigegeben, bis ein
+        Arzt ihn erneut bestätigt.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      responses:
+        "200":
+          description: Medikationsplan (leer, wenn keiner besteht).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MedicationPlan" }
+              example:
+                patient_id: "4711"
+                approval:
+                  approved: true
+                  approved_by: MUS
+                  approved_at: "2026-10-06T11:02:00+02:00"
+                updated_at: "2026-10-06T10:55:00+02:00"
+                entries:
+                  - entry_id: m-1
+                    pzn: "00000001"
+                    name: Ramipril Beispiel 5 mg Tabletten
+                    active_substances:
+                      - name: Ramipril
+                        strength: 5 mg
+                    dosage_form: Tabletten
+                    unit: Stück
+                    dosage:
+                      morning: "1"
+                      noon: "0"
+                      evening: "0"
+                      night: "0"
+                    reason: Bluthochdruck
+                    start_date: "2025-03-01"
+                    runs_out_at: "2026-12-15"
+                    prescribable: true
+                    last_order:
+                      status: ready
+                      placed_at: "2026-09-12"
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/medication-orders:
+    post:
+      tags: [Medikation]
+      operationId: orderMedications
+      summary: Medikamente (Folgerezept) bestellen
+      description: |
+        Legt eine Rezeptbestellung für einen Patienten im PVS an, so wie die Praxis sie aus
+        dem PVS kennt (z. B. als Rezeptanforderung auf der Arbeitsliste des Arztes).
+
+        **Anwendungsfall:** Ein Patient bestellt am Telefon oder per Nachricht sein Medikament nach; nach der Freigabe in atmOS legt atmOS die Bestellung im PVS an.
+
+        atmOS übergibt je Medikament die PZN. Alles Weitere (Packungsgröße, Austausch gegen ein
+        wirkstoffgleiches Präparat / aut idem, Rezeptart) entscheidet das PVS bzw. die Praxis
+        im PVS, wie bei einer Bestellung, die dort direkt angelegt wird.
+        Medikamente ohne PZN bestellt atmOS über `POST /v1/medication-orders/free-text`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MedicationOrderInput" }
+            example:
+              patient_id: "4711"
+              items:
+                - pzn: "00000001"
+                  entry_id: m-1
+              user_code: BSP
+              note: Bestellung über den Telefonassistenten
+      responses:
+        "201":
+          description: |
+            Bestellung angenommen. Das Ergebnis je Position steht in `items`; einzelne Positionen
+            können fehlschlagen, ohne dass die ganze Bestellung fehlschlägt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MedicationOrder" }
+              example:
+                order_id: o-501
+                patient_id: "4711"
+                items:
+                  - pzn: "00000001"
+                    result: queued_for_review
+                    status: pending
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/medication-orders/free-text:
+    post:
+      tags: [Freitext-Bestellung]
+      operationId: orderMedicationFreeText
+      summary: Medikament als Freitext bestellen
+      description: |
+        Legt eine Rezeptanforderung an, deren Inhalt nur aus einem Text besteht: das Medikament,
+        wie der Patient es nennt.
+
+        **Anwendungsfälle:** Ein Patient bestellt ein Medikament, das nicht in seinem
+        Medikationsplan steht oder dessen PZN er nicht kennt („das Blutdruckmittel, das ich im
+        Krankenhaus bekommen habe“). Oder das PVS nimmt Rezeptanforderungen ohnehin als Text an
+        und nicht als PZN-Liste.
+
+        **Was das PVS mit dem Text macht:** Es legt ihn als offene Rezeptanforderung an, die
+        Mitarbeitende oder der Arzt im PVS bearbeiten, so wie eine Anforderung, die in der Praxis
+        von Hand notiert wurde. Das PVS erzeugt daraus **kein Rezept automatisch** und versucht
+        nicht, den Text selbst einem Medikament zuzuordnen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/FreeTextOrderInput" }
+            example:
+              patient_id: "4711"
+              text: "Ramipril 5 mg, 100 Stück, wie bisher"
+              user_code: BSP
+              note: Patient hat telefonisch bestellt
+      responses:
+        "201":
+          description: Angenommen; liegt der Praxis als offene Rezeptanforderung vor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/FreeTextOrder" }
+              example:
+                order_id: o-502
+                patient_id: "4711"
+                result: queued_for_review
+                status: pending
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/sick-note-requests:
+    post:
+      tags: [AU-Anfragen]
+      operationId: requestSickNote
+      summary: Arbeitsunfähigkeitsbescheinigung anfragen
+      description: |
+        Legt im PVS eine Anfrage nach einer Arbeitsunfähigkeitsbescheinigung (AU) an, über die
+        ein Arzt im PVS entscheidet.
+
+        **Anwendungsfall:** Ein Patient meldet sich krank, am Telefon oder per Nachricht, und
+        bittet um eine AU (Erst- oder Folgebescheinigung). atmOS nimmt die Angaben auf und legt
+        die Anfrage im PVS an; der Arzt sieht sie dort mit den Beschwerden und entscheidet.
+
+        **atmOS stellt keine AU aus.** Die Anfrage ist ein Vorschlag des Patienten. Ob, ab wann,
+        bis wann und mit welcher Diagnose eine AU ausgestellt wird (und ob als eAU), entscheidet
+        allein der Arzt im PVS. Das PVS erzeugt aus der Anfrage keine Bescheinigung automatisch.
+
+        **AU und eAU:** Dieselbe Anfrage gilt für die AU auf Papier und für die elektronische
+        AU (eAU). atmOS wählt die Form nicht. Die Praxis stellt die Bescheinigung so aus, wie sie
+        es muss, bei gesetzlich Versicherten in der Regel als eAU.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SickNoteRequestInput" }
+            example:
+              patient_id: "4711"
+              kind: first
+              unable_since: "2026-11-24"
+              requested_until: "2026-11-27"
+              complaints: "Fieber seit gestern, Husten, Gliederschmerzen"
+              user_code: BSP
+      responses:
+        "201":
+          description: Angenommen; liegt dem Arzt im PVS zur Entscheidung vor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SickNoteRequest" }
+              example:
+                request_id: au-77
+                patient_id: "4711"
+                status: pending
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/patients/{patient_id}/sick-notes:
+    get:
+      tags: [AU-Verlauf]
+      operationId: listSickNotes
+      summary: Ausgestellte AU eines Patienten
+      description: |
+        Die Arbeitsunfähigkeitsbescheinigungen (AU und eAU), die die Praxis dem Patienten
+        ausgestellt hat, neueste zuerst. Diagnosen und Angaben zur Übermittlung an die
+        Krankenkasse gehören nicht dazu.
+
+        **Anwendungsfall:** Bittet ein Patient um eine Folgebescheinigung, zeigt atmOS den
+        Mitarbeitenden und dem Arzt, ob und bis wann zuletzt eine AU bestand.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: from
+          in: query
+          description: Nur AU, die an oder nach diesem Tag enden.
+          schema: { type: string, format: date }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Ausgestellte AU, neueste zuerst.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/SickNote" }
+                  next_cursor:
+                    type: [string, "null"]
+              example:
+                items:
+                  - sick_note_id: s-301
+                    kind: first
+                    unable_from: "2026-10-12"
+                    unable_until: "2026-10-16"
+                    issued_at: "2026-10-12T09:20:00+02:00"
+                    issued_by: MUS
+                    issued_as: electronic
+                next_cursor: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/referral-requests:
+    post:
+      tags: [Überweisungs-Anfragen]
+      operationId: requestReferral
+      summary: Überweisung anfragen
+      description: |
+        Legt im PVS eine Anfrage nach einer Überweisung an, über die ein Arzt im PVS entscheidet.
+
+        **Anwendungsfälle:** Ein Patient bittet am Telefon oder per Nachricht um eine
+        Überweisung, z. B. zum Kardiologen. Oder er braucht für eine laufende Behandlung bei einem
+        Facharzt eine Folgeüberweisung für das neue Quartal.
+
+        **atmOS stellt keine Überweisung aus.** Die Anfrage gibt den Wunsch des Patienten weiter.
+        Ob, wohin und mit welcher Diagnose und welchem Auftrag überwiesen wird, entscheidet allein
+        der Arzt im PVS. Das PVS erzeugt aus der Anfrage keine Überweisung automatisch.
+
+        **Folgeüberweisung:** Gibt atmOS bei `kind: follow_up` eine `previous_referral_id` aus
+        `GET /v1/patients/{patient_id}/referrals` an, übernimmt das PVS Fachrichtung bzw.
+        Empfänger, Diagnose und Auftrag aus dieser Überweisung in die Anfrage für das neue Quartal,
+        sodass der Arzt nur noch bestätigt. Ohne `previous_referral_id` ist die Folgeüberweisung
+        eine Anfrage in Freitext (`to`).
+
+        **Regeln** (sonst `422`):
+        - `kind: first` braucht `to` und `reason`; `previous_referral_id` ist dann nicht erlaubt.
+        - `kind: follow_up` braucht `previous_referral_id` oder `to` (oder beides).
+        - `previous_referral_id` muss eine Überweisung dieses Patienten sein.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReferralRequestInput" }
+            examples:
+              erstueberweisung:
+                summary: Erstüberweisung
+                value:
+                  patient_id: "4711"
+                  kind: first
+                  to: Kardiologie
+                  reason: "Herzstolpern seit einigen Wochen, vor allem abends"
+                  user_code: BSP
+              folgeueberweisung:
+                summary: Folgeüberweisung mit Verweis auf die frühere Überweisung
+                value:
+                  patient_id: "4711"
+                  kind: follow_up
+                  previous_referral_id: u-2201
+                  note: Kontrolltermin beim Kardiologen ist schon vereinbart
+                  user_code: BSP
+              folgeueberweisung_freitext:
+                summary: Folgeüberweisung in Freitext (frühere Überweisung nicht in der Liste)
+                value:
+                  patient_id: "4711"
+                  kind: follow_up
+                  to: Orthopädie, Dr. Beispiel
+                  reason: "Weitere Physiotherapie-Kontrolle wegen Knieschmerzen"
+                  user_code: BSP
+      responses:
+        "201":
+          description: Angenommen; liegt dem Arzt im PVS zur Entscheidung vor.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ReferralRequest" }
+              examples:
+                erstueberweisung:
+                  summary: Erstüberweisung angenommen
+                  value:
+                    request_id: ue-88
+                    patient_id: "4711"
+                    status: pending
+                folgeueberweisung:
+                  summary: Folgeüberweisung angenommen
+                  value:
+                    request_id: ue-89
+                    patient_id: "4711"
+                    status: pending
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Den Patienten gibt es nicht.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422":
+          description: |
+            Die Anfrage verstößt gegen eine der Regeln oben, z. B. `previous_referral_id` bei
+            `kind: first`, weder `to` noch `previous_referral_id`, oder eine unbekannte
+            `previous_referral_id`.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+              example:
+                type: https://atmos.example.org/probleme/fachlich-nicht-ausfuehrbar
+                title: Fachlich nicht ausführbar
+                status: 422
+                detail: "previous_referral_id: unbekannte Überweisung für diesen Patienten"
+                errors:
+                  - parameter: previous_referral_id
+                    code: unknown_referral
+
+  /v1/patients/{patient_id}/referrals:
+    get:
+      tags: [Überweisungs-Verlauf]
+      operationId: listReferrals
+      summary: Ausgestellte Überweisungen eines Patienten
+      description: |
+        Die Überweisungen, die die Praxis dem Patienten ausgestellt hat, neueste zuerst.
+
+        **Anwendungsfall:** Bittet ein Patient um eine Folgeüberweisung, kann atmOS nachfragen
+        („Die Überweisung zur Kardiologie aus dem letzten Quartal?“) und die gewählte Überweisung
+        als `previous_referral_id` an `POST /v1/referral-requests` geben. Die Diagnosen helfen
+        den Mitarbeitenden, zwei Überweisungen zur selben Fachrichtung zu unterscheiden.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: from
+          in: query
+          description: Nur Überweisungen, die an oder nach diesem Tag ausgestellt wurden.
+          schema: { type: string, format: date }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Ausgestellte Überweisungen, neueste zuerst.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Referral" }
+                  next_cursor:
+                    type: [string, "null"]
+              example:
+                items:
+                  - referral_id: u-2201
+                    issued_on: "2026-10-02"
+                    quarter: "2026-4"
+                    to: Kardiologie
+                    type: co_treatment
+                    diagnoses: ["Herzrhythmusstörung, nicht näher bezeichnet"]
+                    issued_by: MUS
+                  - referral_id: u-2105
+                    issued_on: "2026-07-14"
+                    quarter: "2026-3"
+                    to: Orthopädie, Dr. Beispiel
+                    type: further_treatment
+                    diagnoses: []
+                next_cursor: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/patients/{patient_id}/documents:
+    get:
+      tags: [Dokumente]
+      operationId: listDocuments
+      summary: Dokumente eines Patienten auflisten
+      description: |
+        **Anwendungsfälle:** Ein Patient fragt nach seinem Befund oder Arztbrief; Mitarbeitende
+        sehen in atmOS, welche Dokumente vorliegen, und senden eines an den Patienten. Sortierung: neueste zuerst.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Dokumente (nur Metadaten).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Document" }
+                  next_cursor:
+                    type: [string, "null"]
+              example:
+                items:
+                  - document_id: d-9001
+                    title: Arztbrief Kardiologie
+                    document_type: letter
+                    content_type: application/pdf
+                    size_bytes: 183422
+                    document_date: "2026-11-10"
+                    created_at: "2026-11-11T08:00:00+01:00"
+                    tags: [Kardiologie]
+                next_cursor: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Dokumente]
+      operationId: uploadDocument
+      summary: Dokument im Archiv des Patienten ablegen
+      description: |
+        **Anwendungsfälle:** Ein Patient schickt per Nachricht oder E-Mail einen Befund,
+        ein Foto oder ein ausgefülltes Formular; nach der Zuordnung legt atmOS die Datei im
+        Archiv des Patienten im PVS ab.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [metadata, file]
+              properties:
+                metadata: { $ref: "#/components/schemas/DocumentInput" }
+                file:
+                  type: string
+                  contentMediaType: application/octet-stream
+                  description: Der Dateiinhalt. Erlaubt sind mindestens PDF, JPEG und PNG.
+            encoding:
+              metadata:
+                contentType: application/json
+      responses:
+        "201":
+          description: Abgelegt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Document" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413":
+          description: Datei zu groß.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "415":
+          description: Dateityp wird nicht angenommen.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+  /v1/patients/{patient_id}/documents/{document_id}/content:
+    get:
+      tags: [Dokumente]
+      operationId: getDocumentContent
+      summary: Inhalt eines Dokuments abrufen
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: document_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Die Datei, mit ihrem `Content-Type`.
+          headers:
+            Content-Disposition:
+              description: Dateiname, z. B. `attachment; filename="arztbrief.pdf"`.
+              schema: { type: string }
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                contentMediaType: application/octet-stream
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/calendars:
+    get:
+      tags: [Kalender]
+      operationId: listCalendars
+      summary: Kalender und Terminarten
+      description: |
+        Alle Kalender (z. B. je Behandler, Raum oder Sprechstunde) mit den Terminarten
+        (Besuchsgründen), die darin buchbar sind. In der Einrichtung wählt die Praxis, welche
+        davon atmOS anbieten darf.
+      responses:
+        "200":
+          description: Kalender.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Calendar" }
+              example:
+                items:
+                  - calendar_id: cal-1
+                    name: Sprechstunde Dr. Musterfrau
+                    reasons:
+                      - reason_id: r-akut
+                        name: Akutsprechstunde
+                        duration_min: 10
+                      - reason_id: r-checkup
+                        name: Gesundheits-Check-up
+                        duration_min: 30
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/appointments/available:
+    get:
+      tags: [Kalender]
+      operationId: listAvailableSlots
+      summary: Freie Termine suchen
+      description: |
+        **Anwendungsfall:** Ein Patient möchte am Telefon einen Termin; atmOS schlägt ihm freie
+        Termine für die gewählte Terminart vor.
+      parameters:
+        - name: calendar_id
+          in: query
+          description: Nur diese Kalender. Mehrfach angebbar; ohne Angabe alle.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: reason_id
+          in: query
+          description: Terminart. Ohne Angabe alle freien Zeiten.
+          schema: { type: string }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+          example: "2026-12-01"
+        - name: to
+          in: query
+          required: true
+          description: Einschließlich. Höchstens 31 Tage nach `from`.
+          schema: { type: string, format: date }
+          example: "2026-12-07"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Freie Termine, früheste zuerst.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Slot" }
+              example:
+                items:
+                  - calendar_id: cal-1
+                    start_at: "2026-12-01T09:30:00+01:00"
+                    duration_min: 10
+                    reason_ids: [r-akut]
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /v1/appointments:
+    get:
+      tags: [Kalender]
+      operationId: listAppointments
+      summary: Gebuchte Termine (alle Patienten)
+      description: |
+        Gebuchte, nicht abgesagte Termine im Zeitraum, über alle Patienten.
+
+        **Anwendungsfälle:** atmOS zeigt alle gebuchten Termine eines Kalenders oder Zeitraums,
+        unabhängig vom Patienten, z. B. für den Tagesplan oder um Überschneidungen zu sehen,
+        bevor ein neuer Termin freigegeben wird.
+      parameters:
+        - name: calendar_id
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          description: Einschließlich. Höchstens 31 Tage nach `from`.
+          schema: { type: string, format: date }
+        - name: include_cancelled
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Termine, früheste zuerst.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppointmentPage" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Kalender]
+      operationId: bookAppointment
+      summary: Termin buchen
+      description: |
+        **Anwendungsfall:** Nach der Freigabe in atmOS (oder automatisch, wenn die Praxis das
+        für diese Terminart erlaubt) bucht atmOS den Termin im PVS-Kalender.
+
+        Für bekannte Patienten gibt atmOS `patient_id` an. Für Neupatienten, die noch keine
+        Patientennummer haben, gibt atmOS stattdessen `new_patient` an; das PVS bucht den
+        Termin dann so, wie es Termine ohne angelegten Patienten führt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppointmentInput" }
+            example:
+              calendar_id: cal-1
+              reason_id: r-akut
+              start_at: "2026-12-01T09:30:00+01:00"
+              patient_id: "4711"
+              note: Halsschmerzen seit drei Tagen
+              user_code: BSP
+      responses:
+        "201":
+          description: Gebucht.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Appointment" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: Der Termin ist nicht mehr frei.
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/Problem" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+
+  /v1/patients/{patient_id}/appointments:
+    get:
+      tags: [Kalender]
+      operationId: listPatientAppointments
+      summary: Termine eines Patienten
+      description: |
+        **Anwendungsfall:** Ein Patient fragt am Telefon „Wann ist mein nächster Termin?“ oder
+        möchte ihn absagen; atmOS sucht seine Termine.
+      parameters:
+        - $ref: "#/components/parameters/PatientId"
+        - name: from
+          in: query
+          description: Ohne Angabe ab heute.
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: include_cancelled
+          in: query
+          schema: { type: boolean, default: false }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: Termine, früheste zuerst.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppointmentPage" }
+              example:
+                items:
+                  - appointment_id: t-3001
+                    calendar_id: cal-1
+                    calendar_name: Sprechstunde Dr. Musterfrau
+                    reason_id: r-checkup
+                    reason_name: Gesundheits-Check-up
+                    start_at: "2026-12-03T08:00:00+01:00"
+                    duration_min: 30
+                    patient_id: "4711"
+                    status: booked
+                next_cursor: null
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/appointments/{appointment_id}/cancel:
+    post:
+      tags: [Kalender]
+      operationId: cancelAppointment
+      summary: Termin absagen
+      description: |
+        **Anwendungsfall:** Ein Patient sagt am Telefon oder per Nachricht ab; atmOS gibt den
+        Termin im PVS frei und vermerkt den Grund. Eine wiederholte Absage desselben Termins
+        antwortet mit `200` und dem schon abgesagten Termin.
+      parameters:
+        - name: appointment_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                cancel_reason:
+                  type: string
+                  maxLength: 500
+                  description: Grund der Absage, wie der Patient ihn nennt.
+                user_code:
+                  type: string
+                  description: Kürzel der Person, die die Absage freigegeben hat.
+            example:
+              cancel_reason: Patient ist verhindert
+              user_code: BSP
+      responses:
+        "200":
+          description: Abgesagt.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Appointment" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Ein Token je Praxis bzw. Standort. Die Praxis legt es selbst in den Einstellungen des
+        PVS fest; atmOS sendet es in jedem Aufruf als `Authorization: Bearer <token>`. Siehe
+        docs/grundlagen.md.
+
+  parameters:
+    PatientId:
+      name: patient_id
+      in: path
+      required: true
+      description: Die Patientennummer im PVS. Sie ändert sich für einen Patienten nie.
+      schema: { type: string, maxLength: 64 }
+      example: "4711"
+    Limit:
+      name: limit
+      in: query
+      description: Höchstzahl der Einträge je Antwort. Das PVS darf weniger liefern.
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Der `next_cursor` der vorigen Antwort. Ohne Angabe die erste Seite.
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: Ungültige Anfrage (fehlender oder falsch geformter Parameter).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+          example:
+            type: https://atmos.example.org/probleme/ungueltiger-parameter
+            title: Ungültiger Parameter
+            status: 400
+            detail: "birth_date: erwartet YYYY-MM-DD, YYYY-MM, YYYY oder --MM-DD"
+            errors:
+              - parameter: birth_date
+                code: invalid_format
+    Unauthorized:
+      description: Kein oder ungültiges Token.
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    NotFound:
+      description: Patient, Dokument oder Termin gibt es nicht (oder nicht mehr).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+    Unprocessable:
+      description: |
+        Die Anfrage ist richtig geformt, aber fachlich nicht ausführbar (z. B. eine Textgruppe,
+        in die nicht geschrieben werden darf, oder ein unbekanntes Kürzel).
+      content:
+        application/problem+json:
+          schema: { $ref: "#/components/schemas/Problem" }
+
+  schemas:
+    Problem:
+      type: object
+      description: Fehler nach RFC 9457.
+      required: [title, status]
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        errors:
+          type: array
+          description: Ein Eintrag je fehlerhaftem Parameter oder Feld.
+          items:
+            type: object
+            required: [code]
+            properties:
+              parameter: { type: string }
+              code: { type: string }
+
+    Info:
+      type: object
+      required: [api_version, modules]
+      properties:
+        api_version:
+          type: string
+          description: Version dieser Spezifikation, die das PVS umsetzt.
+        pvs_name: { type: string }
+        pvs_version: { type: string }
+        modules:
+          type: array
+          description: Angebotene Module. `patients`, `staff` und `casefile` sind immer dabei.
+          items:
+            type: string
+            enum: [patients, staff, casefile, contact_update, medication, medication_free_text, sick_note_requests, sick_note_history, referral_requests, referral_history, documents, calendar]
+        time_zone:
+          type: string
+          description: Zeitzone der Praxis (IANA), z. B. `Europe/Berlin`.
+
+    PatientMatch:
+      type: object
+      required: [patient_id, first_name, last_name, birth_date]
+      properties:
+        patient_id: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        birth_date: { type: [string, "null"], format: date }
+        score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: Optional. Güte der Übereinstimmung, 1 = alle Suchparameter passen genau.
+
+    Patient:
+      type: object
+      required: [patient_id, first_name, last_name, birth_date, insurance, phones, emails]
+      properties:
+        patient_id: { type: string }
+        first_name: { type: string }
+        last_name: { type: string }
+        title: { type: string, description: "Optional. Titel, z. B. „Dr.“" }
+        name_prefix: { type: string, description: "Optional. Namensvorsatz, z. B. „von“" }
+        name_suffix: { type: string, description: Optional. Namenszusatz. }
+        birth_date: { type: [string, "null"], format: date }
+        sex:
+          type: string
+          enum: [female, male, diverse, unknown]
+          description: Optional.
+        insurance: { $ref: "#/components/schemas/Insurance" }
+        phones:
+          type: array
+          items: { $ref: "#/components/schemas/Phone" }
+        emails:
+          type: array
+          items: { $ref: "#/components/schemas/Email" }
+        address: { $ref: "#/components/schemas/Address" }
+
+    Insurance:
+      type: object
+      required: [type, hzv, card_last_read_at]
+      properties:
+        type:
+          type: string
+          enum: [public, private, other, unknown]
+          description: "`public` = gesetzlich (GKV), `private` = privat (PKV), `other` = z. B. Selbstzahler, BG."
+        insurer_name: { type: string, description: Optional. Name der Krankenkasse. }
+        insurance_number: { type: string, description: Optional. Versichertennummer. }
+        hzv:
+          type: string
+          enum: [active, requested, ended, none, unknown]
+          description: |
+            Teilnahme an der Hausarztzentrierten Versorgung (HZV), als Zusammenfassung von
+            `contracts`: `active`, `requested` oder `ended`, wenn ein HZV-Vertrag mit diesem Stand
+            gelistet ist (bei mehreren gilt `active` vor `requested` vor `ended`); `none`, wenn
+            sicher keiner besteht; `unknown`, wenn das PVS es nicht weiß.
+        contracts:
+          type: array
+          description: Optional. Selektivverträge, in die der Patient eingeschrieben ist (HZV, Facharztverträge, weitere).
+          items: { $ref: "#/components/schemas/Contract" }
+        card_last_read_at:
+          type: [string, "null"]
+          format: date-time
+          description: |
+            Wann die Versichertenkarte (eGK) zuletzt eingelesen wurde; `null`, wenn nie. atmOS
+            leitet daraus ab, ob die Karte im laufenden Quartal vorliegt.
+
+    Contract:
+      type: object
+      required: [type, name, status]
+      properties:
+        type:
+          type: string
+          enum: [hzv, specialist, other]
+          description: "`hzv` = Hausarztzentrierte Versorgung, `specialist` = Facharztvertrag, `other` = sonstiger Vertrag."
+        name: { type: string, description: Name des Vertrags, wie im PVS. }
+        status:
+          type: string
+          enum: [active, requested, ended]
+        since: { type: [string, "null"], format: date, description: Optional. Eingeschrieben seit. }
+        until: { type: [string, "null"], format: date, description: Optional. Eingeschrieben bis (bei beendeten Verträgen). }
+
+    Phone:
+      type: object
+      required: [phone_id, number]
+      properties:
+        phone_id: { type: string, description: Kennung der Nummer beim Patienten, für Änderungen. }
+        number:
+          type: [string, "null"]
+          description: Die Nummer in E.164 (`+493023125000`); `null`, wenn das PVS sie nicht normalisieren kann.
+        number_raw: { type: string, description: Optional. Die Nummer, wie sie im PVS steht. }
+        kind:
+          type: string
+          enum: [mobile, landline, work, fax, other]
+        primary: { type: boolean }
+    PhoneInput:
+      type: object
+      required: [number, user_code]
+      properties:
+        number: { type: string, description: E.164. }
+        kind:
+          type: string
+          enum: [mobile, landline, work, fax, other]
+        primary: { type: boolean, default: false }
+        user_code: { type: string, description: Kürzel der Person, die die Änderung freigegeben hat. }
+    PhonePatch:
+      type: object
+      required: [user_code]
+      properties:
+        number: { type: string }
+        kind:
+          type: string
+          enum: [mobile, landline, work, fax, other]
+        primary: { type: boolean }
+        user_code: { type: string }
+
+    Email:
+      type: object
+      required: [email_id, address]
+      properties:
+        email_id: { type: string }
+        address: { type: string, format: email }
+        primary: { type: boolean }
+    EmailInput:
+      type: object
+      required: [address, user_code]
+      properties:
+        address: { type: string, format: email }
+        primary: { type: boolean, default: false }
+        user_code: { type: string }
+    EmailPatch:
+      type: object
+      required: [user_code]
+      properties:
+        address: { type: string, format: email }
+        primary: { type: boolean }
+        user_code: { type: string }
+
+    Address:
+      type: object
+      description: Optional.
+      properties:
+        street: { type: string }
+        zip_code: { type: string }
+        city: { type: string }
+        country: { type: string, description: ISO 3166-1 alpha-2. }
+
+    StaffMember:
+      type: object
+      required: [user_code, full_name]
+      properties:
+        user_code: { type: string, description: Das Kürzel im PVS. }
+        full_name: { type: string }
+        active: { type: boolean, description: Optional. `false` für ausgeschiedene Benutzer. }
+
+    TextGroup:
+      type: object
+      required: [code, label, writable]
+      properties:
+        code: { type: string, description: Kürzel der Textgruppe, wie im PVS. }
+        label: { type: string, description: Voller Name. }
+        writable: { type: boolean, description: Ob atmOS in diese Textgruppe schreiben darf. }
+        hidden: { type: boolean, description: Optional. Ob Einträge dieser Gruppe in der normalen Karteiansicht ausgeblendet sind. }
+
+    CasefileEntry:
+      type: object
+      required: [entry_id, text_group, text, written_at]
+      properties:
+        entry_id: { type: string }
+        text_group: { type: string }
+        text_group_label: { type: string }
+        text: { type: string }
+        user_code: { type: [string, "null"], description: Kürzel des Verfassers. }
+        written_at: { type: string, format: date-time }
+        fields:
+          type: array
+          description: |
+            Optional. Felder eines strukturierten Eintrags in der Reihenfolge des PVS (z. B. bei
+            einer Diagnose Code und Sicherheit).
+          items:
+            type: object
+            required: [label, value]
+            properties:
+              label: { type: string }
+              value: { type: string }
+    CasefileEntryInput:
+      type: object
+      required: [text_group, text, user_code, written_at]
+      properties:
+        text_group: { type: string, description: Code einer Textgruppe mit `writable = true`. }
+        text: { type: string, maxLength: 20000 }
+        user_code: { type: string, description: Kürzel der Person, die den Eintrag verantwortet. }
+        written_at: { type: string, format: date-time, description: Datum und Uhrzeit des Eintrags. }
+
+    MedicationPlan:
+      type: object
+      required: [patient_id, approval, entries]
+      properties:
+        patient_id: { type: string }
+        approval: { $ref: "#/components/schemas/MedicationPlanApproval" }
+        updated_at: { type: [string, "null"], format: date-time, description: Letzte Änderung des Plans. }
+        entries:
+          type: array
+          items: { $ref: "#/components/schemas/MedicationPlanEntry" }
+    MedicationPlanApproval:
+      type: object
+      required: [approved]
+      properties:
+        approved:
+          type: boolean
+          description: |
+            `true`, wenn ein Arzt den aktuellen Stand des Plans bestätigt hat und der Plan seitdem
+            nicht geändert wurde.
+        approved_by: { type: [string, "null"], description: Kürzel des Arztes. }
+        approved_at: { type: [string, "null"], format: date-time }
+    MedicationPlanEntry:
+      type: object
+      required: [entry_id, name, dosage, prescribable]
+      properties:
+        entry_id: { type: string }
+        pzn:
+          type: [string, "null"]
+          pattern: "^\\d{8}$"
+          description: Pharmazentralnummer (8 Ziffern); `null` bei Einträgen ohne PZN (z. B. Freitext, Rezeptur).
+        name: { type: string, description: Handelsname mit Stärke und Darreichungsform. }
+        active_substances:
+          type: array
+          items:
+            type: object
+            required: [name]
+            properties:
+              name: { type: string }
+              strength: { type: string }
+        dosage_form: { type: string, description: "Optional. Darreichungsform, z. B. „Tabletten“." }
+        unit: { type: string, description: "Optional. Dosiereinheit, z. B. „Stück“, „ml“." }
+        dosage:
+          type: object
+          description: Dosierung nach Tageszeit (wie auf dem bundeseinheitlichen Medikationsplan) oder als Freitext.
+          properties:
+            morning: { type: string }
+            noon: { type: string }
+            evening: { type: string }
+            night: { type: string }
+            free_text: { type: string }
+        reason: { type: string, description: Optional. Grund der Einnahme. }
+        note: { type: string, description: Optional. Hinweis. }
+        start_date: { type: [string, "null"], format: date }
+        runs_out_at:
+          type: [string, "null"]
+          format: date
+          description: Tag, an dem das Medikament nach der letzten Verordnung und der Dosierung voraussichtlich aufgebraucht ist.
+        prescribable:
+          type: boolean
+          description: Ob das Medikament über atmOS nachbestellt werden darf (`false` z. B. bei BtM oder auf Anweisung des Arztes).
+        last_order:
+          type: [object, "null"]
+          description: Optional. Die letzte Bestellung dieses Medikaments.
+          properties:
+            status: { $ref: "#/components/schemas/MedicationOrderStatus" }
+            placed_at: { type: string, format: date }
+
+    MedicationOrderStatus:
+      type: string
+      enum: [pending, processing, ready, rejected, cancelled]
+      description: |
+        `pending` = eingegangen, `processing` = in Bearbeitung, `ready` = Rezept ausgestellt,
+        `rejected` = abgelehnt, `cancelled` = zurückgezogen.
+    MedicationOrderInput:
+      type: object
+      required: [patient_id, items, user_code]
+      properties:
+        patient_id: { type: string }
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [pzn]
+            properties:
+              pzn: { type: string, pattern: "^\\d{8}$" }
+              entry_id: { type: string, description: Optional. Der Eintrag im Medikationsplan, aus dem bestellt wird. }
+        user_code: { type: string, description: Kürzel der Person, die die Bestellung freigegeben hat. }
+        note: { type: string, maxLength: 1000, description: Optional. Hinweis für die Praxis. }
+    MedicationOrder:
+      type: object
+      required: [order_id, patient_id, items]
+      properties:
+        order_id: { type: string }
+        patient_id: { type: string }
+        items:
+          type: array
+          items:
+            type: object
+            required: [pzn, result]
+            properties:
+              pzn: { type: string }
+              result:
+                type: string
+                enum: [issued, queued_for_review, failed]
+                description: |
+                  `issued` = das PVS hat das Rezept direkt erzeugt, `queued_for_review` = liegt
+                  der Praxis zur Prüfung vor, `failed` = nicht angelegt (Grund in `failure_reason`).
+              status: { $ref: "#/components/schemas/MedicationOrderStatus" }
+              failure_reason: { type: string }
+
+    FreeTextOrderInput:
+      type: object
+      required: [patient_id, text, user_code]
+      properties:
+        patient_id: { type: string }
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Das Medikament, wie der Patient es nennt (Name, Stärke, Menge, soweit bekannt).
+        user_code: { type: string, description: Kürzel der Person, die die Bestellung freigegeben hat. }
+        note: { type: string, maxLength: 1000, description: Optional. Hinweis für die Praxis. }
+    FreeTextOrder:
+      type: object
+      required: [order_id, patient_id, result]
+      properties:
+        order_id: { type: string }
+        patient_id: { type: string }
+        result:
+          type: string
+          enum: [queued_for_review, failed]
+          description: "`queued_for_review` = liegt der Praxis als offene Anforderung vor, `failed` = nicht angelegt."
+        status: { $ref: "#/components/schemas/MedicationOrderStatus" }
+        failure_reason: { type: string }
+
+    SickNoteKind:
+      type: string
+      enum: [first, follow_up]
+      description: "`first` = Erstbescheinigung, `follow_up` = Folgebescheinigung."
+    SickNoteRequestInput:
+      type: object
+      required: [patient_id, kind, unable_since, complaints, user_code]
+      properties:
+        patient_id: { type: string }
+        kind: { $ref: "#/components/schemas/SickNoteKind" }
+        unable_since:
+          type: string
+          format: date
+          description: Seit wann der Patient nach eigener Angabe arbeitsunfähig ist.
+        requested_until:
+          type: string
+          format: date
+          description: Optional. Bis wann der Patient die AU wünscht. Der Arzt entscheidet.
+        complaints:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: Die Beschwerden in den Worten des Patienten.
+        note: { type: string, maxLength: 1000, description: Optional. Hinweis für die Praxis. }
+        user_code: { type: string, description: Kürzel der Person, die die Anfrage freigegeben hat. }
+    SickNoteRequest:
+      type: object
+      required: [request_id, patient_id, status]
+      properties:
+        request_id: { type: string }
+        patient_id: { type: string }
+        status:
+          type: string
+          enum: [pending]
+          description: Nach dem Anlegen immer `pending` (liegt dem Arzt vor).
+    SickNote:
+      type: object
+      required: [sick_note_id, kind, unable_from, unable_until]
+      properties:
+        sick_note_id: { type: string }
+        kind: { $ref: "#/components/schemas/SickNoteKind" }
+        unable_from: { type: string, format: date, description: Arbeitsunfähig seit. }
+        unable_until: { type: string, format: date, description: Voraussichtlich arbeitsunfähig bis einschließlich. }
+        issued_at: { type: [string, "null"], format: date-time, description: Optional. Wann die AU ausgestellt wurde. }
+        issued_by: { type: [string, "null"], description: Optional. Kürzel des Arztes. }
+        issued_as:
+          type: [string, "null"]
+          enum: [electronic, paper, null]
+          description: Optional. `electronic` = als eAU ausgestellt, `paper` = auf Papier.
+
+    ReferralKind:
+      type: string
+      enum: [first, follow_up]
+      description: "`first` = Erstüberweisung, `follow_up` = Folgeüberweisung (z. B. für ein neues Quartal)."
+    ReferralRequestInput:
+      type: object
+      required: [patient_id, kind, user_code]
+      properties:
+        patient_id: { type: string }
+        kind: { $ref: "#/components/schemas/ReferralKind" }
+        previous_referral_id:
+          type: string
+          description: |
+            Nur bei `kind: follow_up`. Die `referral_id` einer früheren Überweisung dieses
+            Patienten aus `GET /v1/patients/{patient_id}/referrals`.
+        to:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: |
+            Wohin überwiesen werden soll: Fachrichtung oder Arzt bzw. Praxis, als Freitext.
+            Pflicht, außer bei einer Folgeüberweisung mit `previous_referral_id`.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: |
+            Der Grund in den Worten des Patienten. Pflicht bei `kind: first`.
+        findings:
+          type: string
+          maxLength: 2000
+          description: Optional. Befunde für den weiterbehandelnden Arzt.
+        note: { type: string, maxLength: 1000, description: Optional. Hinweis für die Praxis. }
+        user_code: { type: string, description: Kürzel der Person, die die Anfrage freigegeben hat. }
+      allOf:
+        - if:
+            properties: { kind: { const: first } }
+          then:
+            required: [to, reason]
+            not: { required: [previous_referral_id] }
+        - if:
+            properties: { kind: { const: follow_up } }
+          then:
+            anyOf:
+              - required: [previous_referral_id]
+              - required: [to]
+    ReferralRequest:
+      type: object
+      required: [request_id, patient_id, status]
+      properties:
+        request_id: { type: string }
+        patient_id: { type: string }
+        status:
+          type: string
+          enum: [pending]
+          description: Nach dem Anlegen immer `pending` (liegt dem Arzt vor).
+    Referral:
+      type: object
+      required: [referral_id, issued_on, quarter, to, type, diagnoses]
+      properties:
+        referral_id: { type: string }
+        issued_on: { type: string, format: date, description: Ausstellungsdatum. }
+        quarter:
+          type: string
+          pattern: "^\\d{4}-[1-4]$"
+          description: Quartal, für das die Überweisung gilt, als `JJJJ-Q`, z. B. `2026-4` für das 4. Quartal 2026.
+        to: { type: string, description: Fachrichtung und/oder Empfänger, als Text. }
+        type:
+          type: string
+          enum: [order, consultation, co_treatment, further_treatment, other]
+          description: |
+            Art der Überweisung: `order` = Auftragsleistung, `consultation` =
+            Konsiliaruntersuchung, `co_treatment` = Mitbehandlung, `further_treatment` =
+            Weiterbehandlung, `other` = sonstige.
+        diagnoses:
+          type: array
+          description: Diagnosen der Überweisung als Text; leer, wenn keine angegeben sind.
+          items: { type: string }
+        issued_by: { type: [string, "null"], description: Optional. Kürzel des Arztes. }
+
+    Document:
+      type: object
+      required: [document_id, title, content_type, created_at]
+      properties:
+        document_id: { type: string }
+        title: { type: string }
+        document_type:
+          type: string
+          description: "Optional. Art, z. B. `letter` (Arztbrief), `finding` (Befund), `lab`, `image`, `form`, `other`."
+        content_type: { type: string, description: MIME-Typ, z. B. `application/pdf`. }
+        size_bytes: { type: integer }
+        document_date: { type: [string, "null"], format: date, description: Datum des Dokuments selbst (z. B. Briefdatum). }
+        created_at: { type: string, format: date-time, description: Wann das Dokument im PVS abgelegt wurde. }
+        tags:
+          type: array
+          items: { type: string }
+    DocumentInput:
+      type: object
+      required: [title, file_name, user_code]
+      properties:
+        title: { type: string }
+        file_name: { type: string }
+        document_type: { type: string }
+        document_date: { type: string, format: date }
+        tags:
+          type: array
+          items: { type: string }
+        user_code: { type: string, description: Kürzel der Person, die die Ablage freigegeben hat. }
+
+    Calendar:
+      type: object
+      required: [calendar_id, name, reasons]
+      properties:
+        calendar_id: { type: string }
+        name: { type: string }
+        reasons:
+          type: array
+          items:
+            type: object
+            required: [reason_id, name]
+            properties:
+              reason_id: { type: string }
+              name: { type: string }
+              duration_min: { type: integer, description: Optional. Übliche Dauer. }
+    Slot:
+      type: object
+      required: [calendar_id, start_at, duration_min]
+      properties:
+        calendar_id: { type: string }
+        start_at: { type: string, format: date-time }
+        duration_min: { type: integer }
+        reason_ids:
+          type: array
+          description: Terminarten, die zu diesem freien Termin passen.
+          items: { type: string }
+    Appointment:
+      type: object
+      required: [appointment_id, calendar_id, start_at, duration_min, status]
+      properties:
+        appointment_id: { type: string }
+        calendar_id: { type: string }
+        calendar_name: { type: string }
+        reason_id: { type: [string, "null"] }
+        reason_name: { type: [string, "null"] }
+        start_at: { type: string, format: date-time }
+        duration_min: { type: integer }
+        patient_id:
+          type: [string, "null"]
+          description: "`null` bei Terminen ohne angelegten Patienten (z. B. Neupatient)."
+        patient_name: { type: [string, "null"], description: Optional. Name, wenn kein Patient angelegt ist. }
+        status:
+          type: string
+          enum: [booked, cancelled]
+        note: { type: [string, "null"], description: Optional. Freitext der Praxis am Termin. }
+        room: { type: [string, "null"], description: Optional. }
+    AppointmentPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Appointment" }
+        next_cursor: { type: [string, "null"] }
+    AppointmentInput:
+      type: object
+      required: [calendar_id, start_at, user_code]
+      properties:
+        calendar_id: { type: string }
+        reason_id: { type: string }
+        start_at: { type: string, format: date-time }
+        duration_min: { type: integer, description: Optional. Ohne Angabe die Dauer der Terminart. }
+        patient_id: { type: string, description: Für bekannte Patienten. Entweder `patient_id` oder `new_patient`. }
+        new_patient:
+          type: object
+          description: Für Neupatienten ohne Patientennummer.
+          required: [first_name, last_name, birth_date, phone]
+          properties:
+            first_name: { type: string }
+            last_name: { type: string }
+            birth_date: { type: string, format: date }
+            phone: { type: string, description: E.164. }
+            email: { type: string, format: email }
+        note: { type: string, maxLength: 1000, description: Optional. Anliegen des Patienten. }
+        user_code: { type: string, description: Kürzel der Person, die die Buchung freigegeben hat. }
+      oneOf:
+        - required: [patient_id]
+        - required: [new_patient]
